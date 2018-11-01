@@ -31,10 +31,12 @@ class ROS2_facelook_node(Node):
     def __init__(self):
         super().__init__('ros2_facelook_node', namespace='raspicam')
 
-        self.param_image_bbox_topic = str(self.get_parameter_or('bounding_box_topic', '/raspicam/found_faces'))
-        self.param_pwm_topic = str(self.get_parameter_or('pwm_topic', '/pwmhatter/angle'))
-        self.param_angle_step = float(self.get_parameter_or('angle_step', 5.0))
-        self.param_max_angle = float(self.get_parameter_or('max_angle', 80.0))
+        self.set_parameters( [
+            Parameter('bounding_box_topic', Parameter.Type.STRING, 'found_faces'),
+            Parameter('pwm_topic', Parameter.Type.STRING, '/pwmhatter/angle'),
+            Parameter('angle_step', Parameter.Type.DOUBLE, 3.0),
+            Parameter('max_angle', Parameter.Type.DOUBLE, 80.0),
+            ] )
 
         self.initialize_pwm_publisher()
         self.initialize_processing_queue()
@@ -46,8 +48,9 @@ class ROS2_facelook_node(Node):
 
     def initialize_bounding_box_subscriber(self):
         # Setup subscription for incoming bounding box info
-        self.receiver = self.create_subscription(
-                        Int32MultiArray, self.param_bbox_input_topic, self.receive_bounding_box)
+        self.receiver = self.create_subscription(Int32MultiArray,
+                        self.get_parameter_value('bounding_box_topic'),
+                        self.receive_bounding_box)
 
     def initialize_processing_queue(self):
         # Create a queue and a thread that processes messages in the queue
@@ -62,8 +65,16 @@ class ROS2_facelook_node(Node):
 
         self.processor.start()
 
-    def initialize_pwm_publisher():
-        self.pwmmer = PWMmer(self, self.param_pwm_topic, self.param_max_angle, -self.param_max_angle, self.get_logger())
+    def initialize_pwm_publisher(self):
+        # initialize 'known' angle so first request will be sure to go out
+        self.pan_angle = 10000
+        self.tilt_angle = 10000
+
+        self.pwmmer = PWMmer(self,
+                            self.get_parameter_value('pwm_topic'),
+                            -self.get_parameter_value('max_angle'),
+                            self.get_parameter_value('max_angle'),
+                            self.get_logger())
 
     def stop_workers(self):
         # if workers are initialized and running, tell them to stop and wait until stopped
@@ -74,13 +85,16 @@ class ROS2_facelook_node(Node):
 
     def receive_bounding_box(self, msg):
         if type(msg) != type(None) and hasattr(msg, 'data'):
-            self.get_logger().debug(F"FLooker: receive_bbox. dataLen={len(msg.data)}")
+            self.get_logger().debug('FLooker: receive_bbox. dataLen=%s' % (len(msg.data)))
             self.bbox_queue.put(msg)
+        else:
+            self.get_logger().error('FLooker: receive_bbox. no data attribute')
 
     def process_bounding_boxes(self):
         # Take bounding boxes from the queue and send angle commands to the camera
 
         # Initialize camera position
+        self.get_logger().debug('FLooker: Initializing camera to 0,0')
         self.send_pwm_commands(0, 0)
 
         # Loop for each bounding box info and update the camera movement
@@ -95,47 +109,51 @@ class ROS2_facelook_node(Node):
                 break
             if type(msg) != type(None):
                 bboxes = AccessInt32MultiArray(msg)
-                self.get_logger().debug('FLooker: process_bounding_boxes. Boxes=%s' % (bboxes.rows) )
-                width = bboxes.get(0,3)
+                width = bboxes.get(0, 2)
                 widthhalf = width / 2
-                height = bboxes.get(0, 4)
+                height = bboxes.get(0, 3)
                 heighthalf = height / 2
+                self.get_logger().debug('FLooker: process_bounding_boxes. image=%s/%s' % (width, height) )
 
                 # loop over all bounding boxes and computer the average center
                 wcenter = 0
                 hcenter = 0
-                for ii in range(1, bboxes.rows - 1):
-                    wcenter = wcenter + (boxes.get(ii, 2) - bboxes.get(ii, 0))
-                    hcenter = hcenter + (boxes.get(ii, 3) - bboxes.get(ii, 1))
+                for ii in range(1, bboxes.rows):
+                    wcenter = wcenter + ((bboxes.get(ii, 2) - bboxes.get(ii, 0)) / 2) + bboxes.get(ii,0)
+                    hcenter = hcenter + ((bboxes.get(ii, 3) - bboxes.get(ii, 1)) / 2) + bboxes.get(ii,1)
                 waverage = wcenter / ( bboxes.rows - 1)
                 haverage = hcenter / ( bboxes.rows - 1)
+                self.get_logger().debug('FLooker: process_bounding_boxes. averageCenter=%s/%s'
+                                % (waverage, haverage) )
 
                 # positive deltas mean above the middle and negative deltas mean below the middle
                 wdelta = (width / 2) - waverage
                 hdelta = (height / 2) - haverage
 
-                if wdelta <= -widthhalf or wdelta >= widthhalf or hdelta <= -heighthalf or hdelta >= heighthalf:
+                if (wdelta <= -widthhalf
+                        or wdelta >= widthhalf
+                        or hdelta <= -heighthalf
+                        or hdelta >= heighthalf):
                     self.get_logger().error('FLooker: deltas wrong! dim=%s/%s, avg=%s/%s, delta=%s/%s'
                                 % ( width, height, waverage, haverage, wdelta, hdelta) )
                 else:
-                    target_pan_angle = self.pan_angle + (self.param_angle_step * sign(hdelta))
-                    target_tilt_angle = self.tilt_angle + (self.param_angle_step * sign(wdelta))
+                    target_pan_angle = (self.pan_angle
+                        + (self.get_parameter_value('angle_step') * self.sign(wdelta)) )
+                    target_tilt_angle = (self.tilt_angle
+                        - (self.get_parameter_value('angle_step') * self.sign(hdelta)) )
                     self.send_pwm_commands(target_pan_angle, target_tilt_angle)
 
-    def send_pwm_commands(target_pan_angle, target_tilt_angle):
+    def send_pwm_commands(self, target_pan_angle, target_tilt_angle):
         # Send command to PWM channels if the desired angle has changed
-        self.pwmmer('pan', target_pan_angle)
-        self.pwmmer('tilt', target_tilt_angle)
-
         if target_pan_angle != self.pan_angle:
-            if self.pwmmer('pan', target_pan_angle):
+            if self.pwmmer.setPWM('pan', target_pan_angle):
                 self.pan_angle = target_pan_angle
                 self.get_logger().debug('FLooker: sending chan=%s, angle=%s' % ('pan', target_pan_angle))
             else:
                 self.get_logger().error('FLooker: target pan angle failed! targets=%s/%s'
                                 % (target_pan_angle, target_tilt_angle) )
         if target_tilt_angle != self.tilt_angle:
-            if self.pwmmer('tilt', target_tilt_angle):
+            if self.pwmmer.setPWM('tilt', target_tilt_angle):
                 self.tilt_angle = target_tilt_angle
                 self.get_logger().debug('FLooker: sending chan=%s, angle=%s' % ('tilt', target_tilt_angle))
             else:
@@ -152,49 +170,78 @@ class ROS2_facelook_node(Node):
             ret = param_desc.value
         return ret
 
+    def get_parameter_value(self, param):
+        # Helper function to return value of a parameter
+        ret = None
+        param_desc = self.get_parameter(param)
+        if param_desc.type_== Parameter.Type.NOT_SET:
+            raise Exception('Fetch of parameter that does not exist: ' + param)
+        else:
+            ret = param_desc.value
+        return ret
+
+    def sign(self, val):
+        # Helper function that returns the sign of the passed value (1 or -1)
+        return 1 if val >= 0 else -1
+
 class PWMmer:
     # Small class to hold current state of PWM channel
     def __init__(self, node, topic, minVal, maxVal, logger=None):
-        self.publisher = publisher
+        self.node = node
+        self.topic = topic
         self.minVal = minVal
         self.maxVal = maxVal
         self.logger = logger
         self.channels = {}
+        self.logger.debug('PWMmer: init: topic=%s, min=%s, max=%s' %
+                    (topic, str(minVal), str(maxVal)))
 
-        self.publisher = node.create_publisher(PWMArray, topic)
+        self.publisher = self.node.create_publisher(PWMAngle, topic)
 
     def setPWM(self, channel, angle):
         # Send the message to set the given PWM channel
+        ret = True
         if not channel in self.channels:
-            self.channels[channel] = minVal - 1000
+            self.channels[channel] = self.minVal - 1000
 
         if angle != self.channels[channel]:
-            if angle >= self.maxVal or angle <= minVal:
-                self.logger.error('FLooker: target pan angle failed! targets=%s/%s'
-                                % (target_pan_angle, target_tilt_angle) )
+            if angle >= self.maxVal or angle <= self.minVal:
+                self.logger.error('PWMmer: angle out of range. channel=%s, angle=%s'
+                                % (channel, angle) )
+                ret = False
             else:
                 msg = PWMAngle()
-                msg.chan = channel
-                msg.angle = angle
+                msg.chan = str(channel)
+                msg.angle = float(angle)
                 msg.angle_units = PWMAngle.DEGREES
                 self.publisher.publish(msg)
-                self.channel[channel] = angle
+                self.channels[channel] = angle
+                ret = True
+
+        return ret
 
 
 class AccessInt32MultiArray:
     # Wrap a multi-access array with functions for 2D access
     def __init__(self, arr):
         self.arr = arr
-        self.arr_width = int(arr.layout.dim['width'].size)
-        self.arr_height = int(arr.layout.dim['height'].size)
+        self.columns = self.ma_get_size_from_label('width')
+        self.rows = self.ma_get_size_from_label('height')
 
     def rows(self):
         # return the number of rows in the multi-array
-        return self.arr_height
+        return self.rows
 
-    def get(self, ww, hh):
+    def get(self, row, col):
         # return the entry at column 'ww' and row 'hh'
-        return data[ww + ( hh * self.arr_width)]
+        return self.arr.data[col + ( row * self.columns)]
+
+    def ma_get_size_from_label(self, label):
+        # Return dimension size for passed label (usually 'width' or 'height')
+        for mad in self.arr.layout.dim:
+            if mad.label == label:
+                return int(mad.size)
+        return 0
         
 
 class CodeTimer:
