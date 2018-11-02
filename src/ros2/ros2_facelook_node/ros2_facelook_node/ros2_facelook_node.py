@@ -34,7 +34,7 @@ class ROS2_facelook_node(Node):
         self.set_parameters( [
             Parameter('bounding_box_topic', Parameter.Type.STRING, 'found_faces'),
             Parameter('pwm_topic', Parameter.Type.STRING, '/pwmhatter/angle'),
-            Parameter('angle_step', Parameter.Type.DOUBLE, 3.0),
+            Parameter('angle_step', Parameter.Type.DOUBLE, 1.0),
             Parameter('max_angle', Parameter.Type.DOUBLE, 80.0),
             ] )
 

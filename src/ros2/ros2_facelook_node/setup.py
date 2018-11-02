@@ -31,9 +31,7 @@ setup(
        ('share/' + package_name, ['package.xml'])
     ],
     install_requires= [
-        'setuptools',
-        'std_msgs',
-        'sensor_msgs'
+        'setuptools'
     ],
 
     entry_points    = {
