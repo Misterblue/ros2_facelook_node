@@ -31,11 +31,11 @@ class ROS2_facelook_node(Node):
     def __init__(self):
         super().__init__('ros2_facelook_node', namespace='raspicam')
 
-        self.set_parameters( [
-            Parameter('bounding_box_topic', Parameter.Type.STRING, 'found_faces'),
-            Parameter('pwm_topic', Parameter.Type.STRING, '/pwmhatter/angle'),
-            Parameter('angle_step', Parameter.Type.DOUBLE, 1.0),
-            Parameter('max_angle', Parameter.Type.DOUBLE, 80.0),
+        self.set_parameter_defaults( [
+            ('bounding_box_topic', Parameter.Type.STRING, 'found_faces'),
+            ('pwm_topic', Parameter.Type.STRING, '/pwmhatter/angle'),
+            ('angle_step', Parameter.Type.DOUBLE, 1.0),
+            ('max_angle', Parameter.Type.DOUBLE, 80.0),
             ] )
 
         self.initialize_pwm_publisher()
@@ -180,8 +180,26 @@ class ROS2_facelook_node(Node):
             ret = param_desc.value
         return ret
 
+    def set_parameter_defaults(self, params):
+        # If a parameter has not been set externally, set the value to a default.
+        # Passed a list of "(parameterName, parameterType, defaultValue)" tuples.
+        parameters_to_set = []
+        for (pparam, ptype, pdefault) in params:
+            if not self.has_parameter(pparam):
+                parameters_to_set.append( Parameter(pparam, ptype, pdefault) )
+        if len(parameters_to_set) > 0:
+            self.set_parameters(parameters_to_set)
+
+    def has_parameter(self, param):
+        # Return 'True' if a parameter by that name is specified
+        param_desc = self.get_parameter(param)
+        if param_desc.type_== Parameter.Type.NOT_SET:
+            return False
+        return True
+
     def sign(self, val):
-        # Helper function that returns the sign of the passed value (1 or -1)
+        # Helper function that returns the sign of the passed value (1 or -1).
+        # Defined here so we don't have to require numpy.
         return 1 if val >= 0 else -1
 
 class PWMmer:
