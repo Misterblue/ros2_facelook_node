@@ -35,6 +35,7 @@ class ROS2_facelook_node(Node):
             ('bounding_box_topic', Parameter.Type.STRING, 'found_faces'),
             ('pwm_topic', Parameter.Type.STRING, '/pwmhatter/angle'),
             ('angle_step', Parameter.Type.DOUBLE, 1.0),
+            ('delta_magnification', Parameter.Type.DOUBLE, 10.0),
             ('max_angle', Parameter.Type.DOUBLE, 80.0),
             ] )
 
@@ -75,6 +76,7 @@ class ROS2_facelook_node(Node):
                             -self.get_parameter_value('max_angle'),
                             self.get_parameter_value('max_angle'),
                             self.get_logger())
+        self.send_pwm_commands(self.pan_angle, self.tilt_angle)
 
     def stop_workers(self):
         # if workers are initialized and running, tell them to stop and wait until stopped
@@ -108,6 +110,9 @@ class ROS2_facelook_node(Node):
             if self.processor_event.is_set():
                 break
             if type(msg) != type(None):
+                # Bounding boxes come in a two dimensional array:
+                #   Row 0 => ( 0, 0, imageAreaWidth, imageAreaHeight)
+                #   Row n => ( bb_right, bb_top, bb_width, bb_height )
                 bboxes = AccessInt32MultiArray(msg)
                 width = bboxes.get(0, 2)
                 widthhalf = width / 2
@@ -117,18 +122,26 @@ class ROS2_facelook_node(Node):
 
                 # loop over all bounding boxes and computer the average center
                 wcenter = 0
+                wheight = 0
                 hcenter = 0
+                hwidth = 0
                 for ii in range(1, bboxes.rows):
                     wcenter = wcenter + ((bboxes.get(ii, 2) - bboxes.get(ii, 0)) / 2) + bboxes.get(ii,0)
+                    wheight = wheight + bboxes.get(ii,3)
                     hcenter = hcenter + ((bboxes.get(ii, 3) - bboxes.get(ii, 1)) / 2) + bboxes.get(ii,1)
-                waverage = wcenter / ( bboxes.rows - 1)
-                haverage = hcenter / ( bboxes.rows - 1)
-                self.get_logger().debug('FLooker: process_bounding_boxes. averageCenter=%s/%s'
-                                % (waverage, haverage) )
+                    hwidth = hwidth + bboxes.get(ii,2)
+                waverage = wcenter / ( bboxes.rows - 1) # average horizontal center of all boxes
+                wheight = wheight / ( bboxes.rows - 1)  # average height of all boxes
+                haverage = hcenter / ( bboxes.rows - 1) # average vertical center of all boxes
+                hwidth = hwidth / ( bboxes.rows - 1)    # average width of all boxes
+                self.get_logger().debug('FLooker: process_bounding_boxes. averageCenter=%s/%s, averageSize=%s/%s'
+                                % (waverage, haverage, hwidth, wheight) )
 
                 # positive deltas mean above the middle and negative deltas mean below the middle
                 wdelta = (width / 2) - waverage
                 hdelta = (height / 2) - haverage
+                self.get_logger().debug('FLooker: process_bounding_boxes. deltas=%s/%s'
+                                % (wdelta, hdelta) )
 
                 if (wdelta <= -widthhalf
                         or wdelta >= widthhalf
@@ -138,24 +151,33 @@ class ROS2_facelook_node(Node):
                                 % ( width, height, waverage, haverage, wdelta, hdelta) )
                 else:
                     target_pan_angle = (self.pan_angle
-                        + (self.get_parameter_value('angle_step') * self.sign(wdelta)) )
+                        + (self.get_parameter_value('angle_step')
+                            * self.sign(wdelta)
+                            * abs(wdelta) / self.get_parameter_value('delta_magnification')
+                            )
+                        )
                     target_tilt_angle = (self.tilt_angle
-                        - (self.get_parameter_value('angle_step') * self.sign(hdelta)) )
+                        - (self.get_parameter_value('angle_step')
+                            * self.sign(hdelta)
+                            * abs(hdelta) / self.get_parameter_value('delta_magnification')
+                            )
+                        )
                     self.send_pwm_commands(target_pan_angle, target_tilt_angle)
 
     def send_pwm_commands(self, target_pan_angle, target_tilt_angle):
-        # Send command to PWM channels if the desired angle has changed
+        # Send command to PWM channels if the desired angle has changed.
+        # Note: uses and updates self.pan_angle and self.tilt_angle.
         if target_pan_angle != self.pan_angle:
             if self.pwmmer.setPWM('pan', target_pan_angle):
-                self.pan_angle = target_pan_angle
                 self.get_logger().debug('FLooker: sending chan=%s, angle=%s' % ('pan', target_pan_angle))
+                self.pan_angle = target_pan_angle
             else:
                 self.get_logger().error('FLooker: target pan angle failed! targets=%s/%s'
                                 % (target_pan_angle, target_tilt_angle) )
         if target_tilt_angle != self.tilt_angle:
             if self.pwmmer.setPWM('tilt', target_tilt_angle):
-                self.tilt_angle = target_tilt_angle
                 self.get_logger().debug('FLooker: sending chan=%s, angle=%s' % ('tilt', target_tilt_angle))
+                self.tilt_angle = target_tilt_angle
             else:
                 self.get_logger().error('FLooker: target tilt angle failed! targets=%s/%s'
                                 % (target_pan_angle, target_tilt_angle) )
